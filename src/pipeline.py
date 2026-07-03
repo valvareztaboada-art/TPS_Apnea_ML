@@ -45,16 +45,15 @@ PT_GUARDA_BORDE_MS = 200
 # PT_VENTANA_UMBRAL_SEG segundos y se suaviza para evitar saltos abruptos.
 PT_VENTANA_UMBRAL_SEG = 30
 PT_SUAVIZADO_UMBRAL_SEG = 5
-# Piso (floor) del umbral local: fraccion del umbral mediano global por debajo
-# de la cual el umbral local no puede caer. Evita la sobredeteccion en regiones
-# de baja amplitud (donde el umbral local se desplomaba y aparecian falsos
-# picos, p.ej. x17 en Apnea-ECG). 0 = sin piso (comportamiento anterior).
-PT_FLOOR_FRAC = 0.5
 
 # Filtros temporales sobre RR
 RR_MIN_FISIOL = 0.3
 RR_MAX_FISIOL = 2.0
-MALIK_UMBRAL = 0.20
+# Malik al 30% (antes 20%): durante la apnea hay variacion ciclica de la FC
+# (CVHR) con cambios latido-a-latido que pueden superar el 20% sin ser
+# artefactos. Con 20% se marcaban como outliers latidos que son justamente la
+# senal de apnea que queremos conservar. 30% respeta esa fisiologia.
+MALIK_UMBRAL = 0.30
 MEDIANA_VENTANA = 5
 MEDIANA_UMBRAL = 0.30
 
@@ -109,8 +108,7 @@ def pt_detectar_picos(integrada, fs, refractario_ms=PT_REFRACTARIO_MS,
                        alpha=PT_ADAPT_ALPHA,
                        guarda_borde_ms=PT_GUARDA_BORDE_MS,
                        ventana_umbral_seg=PT_VENTANA_UMBRAL_SEG,
-                       suavizado_umbral_seg=PT_SUAVIZADO_UMBRAL_SEG,
-                       floor_frac=PT_FLOOR_FRAC):
+                       suavizado_umbral_seg=PT_SUAVIZADO_UMBRAL_SEG):
     """Deteccion adaptativa LOCAL.
 
     Para cada ventana de `ventana_umbral_seg` segundos, calcula:
@@ -120,12 +118,6 @@ def pt_detectar_picos(integrada, fs, refractario_ms=PT_REFRACTARIO_MS,
     `suavizado_umbral_seg` segundos para evitar saltos abruptos entre
     ventanas. Asi el detector se adapta a cambios de amplitud a lo largo del
     registro (electrodos flojos, cambios posturales, ruido transitorio).
-
-    Ademas se impone un PISO (floor): el umbral local no puede caer por debajo
-    de `floor_frac` veces el umbral mediano global. En regiones de baja amplitud
-    el umbral local se desplomaba y el detector empezaba a marcar ruido como
-    latidos (sobredeteccion observada en x17). El piso lo evita sin afectar las
-    zonas de amplitud normal. floor_frac=0 desactiva el piso.
 
     Si el registro es muy corto para hacer ventanas, cae a un umbral global.
 
@@ -156,11 +148,6 @@ def pt_detectar_picos(integrada, fs, refractario_ms=PT_REFRACTARIO_MS,
         if suav_n > 1:
             kernel = np.ones(suav_n) / suav_n
             umbrales = np.convolve(umbrales, kernel, mode='same')
-        # Piso: el umbral local no puede caer por debajo de floor_frac veces
-        # la mediana de los umbrales locales (referencia global robusta).
-        if floor_frac > 0:
-            piso = floor_frac * float(np.median(umbrales))
-            umbrales = np.maximum(umbrales, piso)
 
     # Enmascarar bordes y encontrar todos los picos respetando refractario
     integrada_busqueda = integrada.copy()
