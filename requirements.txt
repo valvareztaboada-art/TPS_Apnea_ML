@@ -1,0 +1,35 @@
+# =============================================================================
+# Deteccion de apnea del sueno desde ECG - dependencias
+# =============================================================================
+# Probado con Python 3.11-3.14 en Windows y Linux.
+#
+# Instalacion:
+#   python -m pip install -r requirements.txt
+#
+# Nota (Windows + Python 3.14): PyWavelets y PySide6 instalan sin compilar
+# (traen wheels precompilados). NO se usa pyedflib (no compila en 3.14 sin
+# Visual C++); la lectura de EDF de UCDDB se hace con un lector propio en numpy.
+# =============================================================================
+
+# --- Nucleo cientifico ---
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+
+# --- Lectura de senales PhysioNet (formato WFDB de Apnea-ECG) ---
+wfdb>=4.1
+
+# --- Transformada wavelet (features novedosas) ---
+PyWavelets>=1.4
+
+# --- Machine Learning ---
+scikit-learn>=1.3
+joblib>=1.3
+
+# --- Graficos (analisis y figuras del informe) ---
+matplotlib>=3.7
+seaborn>=0.12          # opcional: mejora los graficos del 04b; si falta, usa matplotlib
+
+# --- Interfaz grafica (interfaz_apnea.py) ---
+PySide6>=6.5
+pyqtgraph>=0.13
