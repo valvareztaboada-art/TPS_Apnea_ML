@@ -1,23 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-Monitor ECG en tiempo real — R + FC + timeline de la noche + explicabilidad
-============================================================================
-- ECG scrolleando con R marcados, FC latido a latido.
-- Timeline de toda la noche con DOS franjas (arriba: prediccion del modelo,
-  abajo: etiqueta real/clinica) — permite ver de un vistazo falsos
-  positivos/negativos. Es CLICKEABLE: clickeando un minuto la interfaz
-  saltea el reproductor ahi mismo (y se pausa) para poder inspeccionarlo.
-- Botones para pausar/reanudar y para saltar directo al minuto de apnea
-  anterior/siguiente (predicha).
-- Panel de datos del paciente (edad, sexo, altura, peso, AHI/AI/HI reales)
-  leidos de additional-information.txt.
-- Panel de features del minuto que se esta viendo: valor actual vs. la
-  media tipica en minutos normales y en minutos con apnea (ranking_features
-  .csv), ordenadas por importancia en el modelo final (importancias.csv).
-  Responde "por que el modelo cree que ac hay apnea".
-Todo sale del cache (picos_R, features_apnea.csv, oof_predicciones.csv,
-ranking_features.csv, importancias.csv).
-Correr desde la MISMA carpeta que interfaz_apnea.py.
+Interfaz de visualizacion de apnea del sueno — dos solapas
+===========================================================
+
+Interfaz interactiva (PySide6 + pyqtgraph) que integra dos vistas sobre el
+mismo sistema de deteccion de apnea, con un selector de registro compartido:
+
+  SOLAPA TECNICA (perfil ingenieria / analisis de datos)
+    - ECG con las ondas R detectadas.
+    - Tacograma RR con los intervalos descartados (outliers) marcados,
+      sincronizado con el ECG.
+    - Panel de features por minuto (z-normalizadas) con el fondo coloreado
+      segun la prediccion del modelo y marcas en los minutos de apnea real.
+    - Tabla de todos los minutos con features y prediccion del modelo.
+    - Funciona para las dos bases: Apnea-ECG y UCDDB.
+
+  SOLAPA MEDICA (perfil clinico / tamizaje) — solo Apnea-ECG
+    - Monitor de la noche: ECG animado, timeline de doble tira (prediccion
+      del modelo vs etiqueta real), datos del paciente, resumen a nivel
+      sujeto (AHI estimado) y explicabilidad de features del minuto.
+    - Para UCDDB no se muestra: no se dispone de datos clinicos del paciente
+      (edad, sexo, AHI de referencia), por lo que la vista clinica no aplica.
+
+Pipeline nuevo (ML). Lee del cache:
+  - cache/<record>.npz              (03b: picos_R, rr_crudo, rr_interp, flags, fs)
+  - cache/features_apnea.csv        (04)
+  - cache/oof_predicciones.csv      (05: prediccion del modelo por minuto, OOF)
+  - cache/ranking_features.csv      (04b: media_A / media_N por feature)
+  - cache/importancias.csv          (05: orden de features por importancia)
+  - cache_ucd/<record>.npz          (00: ECG + labels de UCDDB)
+  - cache_ucd_proc/<record>.npz     (03b: picos/rr/flags de UCDDB)
+  - cache_ucd_proc/features_ucd.csv (04)
+  - cache_ucd_proc/predicciones_ucd.csv (06: prediccion del modelo en UCDDB) [opcional]
+
+Correr desde la carpeta del proyecto: python interfaz_apnea.py
 """
 
 import os
@@ -25,63 +41,185 @@ import sys
 
 import numpy as np
 import pandas as pd
-import pyqtgraph as pg
-from PySide6 import QtCore, QtGui, QtWidgets
 
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QSplitter, QComboBox, QTabWidget,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableView, QFormLayout,
+    QHeaderView, QGroupBox, QGridLayout, QStatusBar, QMessageBox, QTableWidget,
+    QTableWidgetItem, QAbstractItemView,
+)
+import pyqtgraph as pg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from src.pipeline import cargar_ecg, filtrar_ecg_general
+from src.pipeline import cargar_ecg, filtrar_ecg_general, clasificar_grupo
 
 
-# ------------------------------- Config -------------------------------
-DATA_DIR  = 'apnea-ecg-database-1.0.0'
-CACHE_DIR = 'cache'
-RECORD    = 'c01'
-FS        = 100
-VENTANA_S = 20
-DT_MS     = 40
-VELOCIDAD = 1.0        # 1.0 = tiempo real. Subilo para ver el cursor barrer la noche
-N_PROMEDIO_FC   = 5    # latidos para suavizar la FC
-N_FEATURES_PANEL = 21  # cuantas features mostrar en el panel (ordenadas por importancia)
+# =============================================================================
+# Constantes y rutas de cache
+# =============================================================================
 
-APNEA_RGB  = (200, 60, 60)     # rojo
-NORMAL_RGB = (210, 235, 210)   # verde claro
-
+DATA_DIR = 'apnea-ecg-database-1.0.0'      # registros wfdb de Apnea-ECG
+CACHE_DIR = 'cache'                          # cache Apnea-ECG (03b, 04, 05)
+CACHE_UCD_RAW = 'cache_ucd'                  # cache UCD con ECG (00)
+CACHE_UCD_PROC = 'cache_ucd_proc'            # cache UCD procesado (03b, 04)
 ADDITIONAL_INFO_FILE = 'additional-information.txt'
 
-ESTILO_BOTON_NAV = """
-QPushButton {
-    background-color: #2b2f3a;
-    color: #e8e8e8;
-    border: 1px solid #454d61;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 13px;
-    font-weight: 600;
-}
-QPushButton:hover  { background-color: #394158; border-color: #5a6480; }
-QPushButton:pressed { background-color: #1f232c; }
-"""
+FS = 100
 
-ESTILO_BOTON_PLAY = """
-QPushButton {
-    background-color: #c02020;
-    color: white;
-    border: none;
-    border-radius: 24px;
-    font-size: 20px;
+CLASS_COLORS = {
+    'A': (200, 60, 60),     # rojo  - apnea
+    'B': (220, 150, 50),    # naranja - borderline
+    'C': (60, 160, 80),     # verde - control
 }
-QPushButton:hover   { background-color: #d43333; }
-QPushButton:pressed { background-color: #9c1a1a; }
-"""
+APNEA_RGB = (200, 60, 60)
+NORMAL_RGB = (210, 235, 210)
+
+pg.setConfigOption('background', '#fafafa')
+pg.setConfigOption('foreground', '#222222')
+pg.setConfigOption('antialias', True)
+
+
+FEATURE_LABELS = {
+    'mean_rr': 'RR medio (s)', 'sdnn': 'SDNN (s)', 'rmssd': 'RMSSD (s)',
+    'nn50': 'NN50', 'pnn50': 'pNN50 (%)',
+    'mean_hr': 'FC media (lpm)', 'sd_hr': 'SD de la FC (lpm)',
+    'vlf_power': 'Potencia VLF', 'lf_power': 'Potencia LF', 'hf_power': 'Potencia HF',
+    'total_power': 'Potencia total', 'lf_hf_ratio': 'Ratio LF/HF',
+    'lf_norm': 'LF normalizada', 'hf_norm': 'HF normalizada',
+    'cvhr_power': 'Potencia CVHR', 'cvhr_norm': 'CVHR normalizada',
+    'wav_energy_L1': 'Energia wavelet L1', 'wav_energy_L2': 'Energia wavelet L2',
+    'wav_energy_L3': 'Energia wavelet L3', 'wav_energy_L4': 'Energia wavelet L4',
+    'wav_energy_L5': 'Energia wavelet L5', 'wav_entropy': 'Entropia wavelet',
+    'edr_resp_power': 'EDR potencia respiratoria', 'edr_apnea_power': 'EDR potencia apneica',
+    'edr_resp_norm': 'EDR resp. normalizada', 'edr_apnea_norm': 'EDR apneica normalizada',
+    'edr_apnea_resp_ratio': 'EDR ratio apnea/resp',
+}
+
+
+# =============================================================================
+# Helpers de carga
+# =============================================================================
+
+def _cargar_info_paciente(record, data_dir, path=ADDITIONAL_INFO_FILE):
+    """Datos del paciente desde additional-information.txt (solo Apnea-ECG)."""
+    ruta = os.path.join(data_dir, path)
+    if not os.path.exists(ruta):
+        return None
+    with open(ruta, 'r', encoding='utf-8', errors='ignore') as f:
+        for linea in f:
+            partes = linea.split()
+            if len(partes) < 12 or partes[0] != record:
+                continue
+            try:
+                return {
+                    'duracion_min': int(partes[1]),
+                    'no_apnea_min': int(partes[2]),
+                    'apnea_min': int(partes[3]),
+                    'horas_con_apnea': int(partes[4]),
+                    'AI': float(partes[5]), 'HI': float(partes[6]), 'AHI': float(partes[7]),
+                    'edad': int(partes[8]), 'sexo': partes[9],
+                    'altura_cm': int(partes[10]), 'peso_kg': int(partes[11]),
+                }
+            except ValueError:
+                return None
+    return None
+
+
+def es_ucd(record):
+    """True si el record es de la base UCDDB (por prefijo)."""
+    return str(record).startswith('ucddb')
+
+
+def cargar_ecg_ucd(record, cache_raw=CACHE_UCD_RAW):
+    """Carga el ECG de UCD desde el cache RAW del 00 (ya remuestreado a 100 Hz)."""
+    path = os.path.join(cache_raw, f'{record}.npz')
+    data = np.load(path, allow_pickle=True)
+    if 'ecg' not in data.files:
+        return None
+    return data['ecg'].astype(float)
+
+
+# =============================================================================
+# Modelo Qt para la tabla de minutos (solapa tecnica)
+# =============================================================================
+
+class TablaMinutosModel(QtCore.QAbstractTableModel):
+    """Tabla con features y la prediccion del modelo por minuto."""
+
+    COLUMNS = [
+        ('minute', 'Min'),
+        ('label', 'Real'),
+        ('cvhr_norm', 'cvhr_norm'),
+        ('lf_hf_ratio', 'LF/HF'),
+        ('wav_energy_L5', 'wav_L5'),
+        ('edr_apnea_resp_ratio', 'EDR ap/resp'),
+        ('proba_apnea', 'p(apnea)'),
+        ('pred', 'Modelo'),
+    ]
+
+    def __init__(self, df, parent=None):
+        super().__init__(parent)
+        self.df = df.reset_index(drop=True)
+
+    def rowCount(self, parent=QtCore.QModelIndex()):
+        return len(self.df)
+
+    def columnCount(self, parent=QtCore.QModelIndex()):
+        return len(self.COLUMNS)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.COLUMNS[section][1]
+        if role == Qt.DisplayRole and orientation == Qt.Vertical:
+            return str(section)
+        return None
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        col_key = self.COLUMNS[index.column()][0]
+        val = self.df.iloc[index.row()].get(col_key) if col_key in self.df.columns else None
+
+        if role == Qt.DisplayRole:
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                return '-'
+            if col_key == 'pred':
+                return 'APNEA' if int(val) == 1 else 'Normal'
+            if isinstance(val, float):
+                return f'{val:.3f}'
+            if isinstance(val, (int, np.integer)):
+                return str(int(val))
+            return str(val)
+
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignCenter)
+
+        if role == Qt.BackgroundRole:
+            if col_key == 'label':
+                if val == 'A':
+                    return QtGui.QColor(255, 225, 225)
+                if val == 'N':
+                    return QtGui.QColor(225, 245, 225)
+            if col_key == 'pred':
+                if val == 1:
+                    return QtGui.QColor(255, 225, 225)
+                if val == 0:
+                    return QtGui.QColor(225, 245, 225)
+        return None
+
+
+# =============================================================================
+# Barra de comparacion (solapa medica) — valor vs media normal/apnea
+# =============================================================================
 
 class BarraComparacion(QtWidgets.QWidget):
-    """Ubica el valor actual de una feature en una barra entre la media
-    tipica de minutos normales (izquierda, verde) y de minutos con apnea
-    (derecha, rojo). Mucho mas facil de leer de un vistazo que 3 numeros."""
+    """Ubica el valor de una feature en una barra entre la media tipica de
+    minutos normales (izquierda, verde) y de minutos con apnea (derecha, rojo)."""
 
     def __init__(self, valor, media_normal, media_apnea, parent=None):
         super().__init__(parent)
@@ -120,201 +258,397 @@ class BarraComparacion(QtWidgets.QWidget):
         p.setFont(f)
         txt_n = f'{self.media_normal:.2g}' if self.media_normal is not None else '-'
         txt_a = f'{self.media_apnea:.2g}' if self.media_apnea is not None else '-'
-        p.drawText(QtCore.QRectF(x0, barra_y + barra_h + 3, 60, 14), QtCore.Qt.AlignLeft, txt_n)
-        p.drawText(QtCore.QRectF(x1 - 60, barra_y + barra_h + 3, 60, 14), QtCore.Qt.AlignRight, txt_a)
+        p.drawText(QtCore.QRectF(x0, barra_y + barra_h + 3, 60, 14), int(QtCore.Qt.AlignLeft), txt_n)
+        p.drawText(QtCore.QRectF(x1 - 60, barra_y + barra_h + 3, 60, 14), int(QtCore.Qt.AlignRight), txt_a)
 
 
-FEATURE_LABELS = {
-    'mean_rr': 'RR medio (s)', 'sdnn': 'SDNN (s)', 'rmssd': 'RMSSD (s)',
-    'nn50': 'NN50', 'pnn50': 'pNN50 (%)',
-    'mean_hr': 'FC media (lpm)', 'sd_hr': 'SD de la FC (lpm)',
-    'vlf_power': 'Potencia VLF', 'lf_power': 'Potencia LF', 'hf_power': 'Potencia HF',
-    'total_power': 'Potencia total', 'lf_hf_ratio': 'Ratio LF/HF',
-    'lf_norm': 'LF normalizada', 'hf_norm': 'HF normalizada',
-    'cvhr_power': 'Potencia CVHR', 'cvhr_norm': 'CVHR normalizada',
-    'wav_energy_L1': 'Energia wavelet L1', 'wav_energy_L2': 'Energia wavelet L2',
-    'wav_energy_L3': 'Energia wavelet L3', 'wav_energy_L4': 'Energia wavelet L4',
-    'wav_energy_L5': 'Energia wavelet L5', 'wav_entropy': 'Entropia wavelet',
-    'edr_resp_power': 'EDR potencia respiratoria', 'edr_apnea_power': 'EDR potencia apneica',
-    'edr_resp_norm': 'EDR resp. normalizada', 'edr_apnea_norm': 'EDR apneica normalizada',
-    'edr_apnea_resp_ratio': 'EDR ratio apnea/resp',
-}
+# =============================================================================
+# SOLAPA TECNICA
+# =============================================================================
 
+class SolapaTecnica(QWidget):
+    """Vista tecnica: ECG + tacograma + features + tabla, para ambas bases."""
 
-def _cargar_info_paciente(record, data_dir, path=ADDITIONAL_INFO_FILE):
-    """Parsea additional-information.txt y devuelve un dict con los datos
-    del paciente para `record`, o None si no esta (p.ej. registros x*)."""
-    ruta = os.path.join(data_dir, path)
-    if not os.path.exists(ruta):
-        return None
-    with open(ruta, 'r', encoding='utf-8', errors='ignore') as f:
-        for linea in f:
-            partes = linea.split()
-            if len(partes) < 12 or partes[0] != record:
+    def __init__(self, datos, parent=None):
+        super().__init__(parent)
+        self.datos = datos          # referencia al contenedor de datos compartidos
+        self._record = None
+        self._cache = None
+        self._ecg = None
+        self._fs = FS
+        self._feat = None
+        self._marca_minuto = None
+        self._build_ui()
+
+    def _build_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(8)
+
+        # --- Panel izquierdo: resumen + prediccion ---
+        left = QWidget()
+        left.setMinimumWidth(250)
+        left.setMaximumWidth(300)
+        ll = QVBoxLayout(left)
+        ll.setSpacing(8)
+
+        gb_resumen = QGroupBox('Resumen del registro')
+        gl = QGridLayout(gb_resumen)
+        gl.setVerticalSpacing(4)
+        self.lbl_grupo = QLabel('-')
+        self.lbl_clase_real = QLabel('-')
+        self.lbl_duracion = QLabel('-')
+        self.lbl_fc_media = QLabel('-')
+        self.lbl_n_outliers = QLabel('-')
+        for i, (k, v) in enumerate([
+            ('Base', self.lbl_grupo),
+            ('Clase real', self.lbl_clase_real),
+            ('Duracion', self.lbl_duracion),
+            ('FC media', self.lbl_fc_media),
+            ('Outliers RR', self.lbl_n_outliers),
+        ]):
+            gl.addWidget(QLabel(f'{k}:'), i, 0)
+            gl.addWidget(v, i, 1)
+        ll.addWidget(gb_resumen)
+
+        # Prediccion del modelo (nivel sujeto)
+        gb_pred = QGroupBox('Prediccion del modelo (ML)')
+        gp = QGridLayout(gb_pred)
+        gp.setVerticalSpacing(4)
+        self.lbl_min_apnea_real = QLabel('-')
+        self.lbl_min_apnea_pred = QLabel('-')
+        self.lbl_ahi_est = QLabel('-')
+        for i, (k, v) in enumerate([
+            ('Min. apnea (real)', self.lbl_min_apnea_real),
+            ('Min. apnea (modelo)', self.lbl_min_apnea_pred),
+            ('AHI estimado', self.lbl_ahi_est),
+        ]):
+            gp.addWidget(QLabel(f'{k}:'), i, 0)
+            gp.addWidget(v, i, 1)
+        ll.addWidget(gb_pred)
+
+        ll.addStretch()
+
+        legend = QLabel(
+            '<small><b>Leyenda</b><br>'
+            '<span style="background-color: rgb(255,225,225);'
+            ' padding: 1px 4px;">Apnea</span> &nbsp;'
+            '<span style="background-color: rgb(225,245,225);'
+            ' padding: 1px 4px;">Normal</span></small>'
+        )
+        legend.setWordWrap(True)
+        ll.addWidget(legend)
+        main_layout.addWidget(left)
+
+        # --- Panel derecho: plots + tabla ---
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        self.plot_ecg = pg.PlotWidget(title='ECG con R detectados')
+        self.plot_ecg.setLabel('left', 'ECG (mV)')
+        self.plot_ecg.setLabel('bottom', 'Tiempo (s)')
+        self.plot_ecg.setDownsampling(auto=True, mode='peak')
+        self.plot_ecg.setClipToView(True)
+        self.plot_ecg.showGrid(x=True, y=True, alpha=0.3)
+        splitter.addWidget(self.plot_ecg)
+
+        self.plot_rr = pg.PlotWidget(title='Tacograma RR (outliers marcados)')
+        self.plot_rr.setLabel('left', 'RR (s)')
+        self.plot_rr.setLabel('bottom', 'Tiempo (s)')
+        self.plot_rr.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_rr.setXLink(self.plot_ecg)
+        splitter.addWidget(self.plot_rr)
+
+        self.plot_features = pg.PlotWidget(
+            title='Features por minuto (fondo = prediccion del modelo)')
+        self.plot_features.setLabel('left', 'Feature (z-norm robusto)')
+        self.plot_features.setLabel('bottom', 'Minuto')
+        self.plot_features.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_features.addLegend(offset=(10, 10))
+        splitter.addWidget(self.plot_features)
+
+        self.tabla = QTableView()
+        self.tabla.setSelectionBehavior(QTableView.SelectRows)
+        self.tabla.setSelectionMode(QTableView.SingleSelection)
+        self.tabla.verticalHeader().setVisible(False)
+        self.tabla.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.tabla.clicked.connect(self._on_tabla_click)
+        splitter.addWidget(self.tabla)
+
+        splitter.setSizes([220, 160, 280, 220])
+        main_layout.addWidget(splitter, stretch=1)
+
+    # ---------------------------------------------------------------------
+    def cargar_registro(self, record):
+        """Carga un registro de cualquiera de las dos bases en la vista tecnica."""
+        self._record = record
+        ucd = es_ucd(record)
+
+        # cache npz (picos, rr, flags)
+        cache_dir = CACHE_UCD_PROC if ucd else CACHE_DIR
+        cache_path = os.path.join(cache_dir, f'{record}.npz')
+        if not os.path.exists(cache_path):
+            raise FileNotFoundError(f'No se encontro {cache_path}.')
+        self._cache = np.load(cache_path, allow_pickle=True)
+        self._fs = int(self._cache['fs'])
+
+        # ECG filtrado
+        if ucd:
+            ecg_raw = cargar_ecg_ucd(record)
+            self._ecg = filtrar_ecg_general(ecg_raw, self._fs) if ecg_raw is not None else None
+        else:
+            ecg_raw, _, _ = cargar_ecg(record, DATA_DIR)
+            self._ecg = filtrar_ecg_general(ecg_raw, self._fs)
+
+        # features + predicciones de este registro (merge)
+        feats = self.datos.features_ucd if ucd else self.datos.features_apnea
+        preds = self.datos.pred_ucd if ucd else self.datos.pred_apnea
+        self._feat = feats[feats['record'] == record].copy()
+        if preds is not None and len(preds):
+            cols = [c for c in ['minute', 'proba_apnea', 'pred', 'y_true'] if c in preds.columns]
+            pr = preds[preds['record'] == record][cols]
+            self._feat = self._feat.merge(pr, on='minute', how='left')
+        self._feat = self._feat.sort_values('minute').reset_index(drop=True)
+
+        self._actualizar_resumen(record, ucd)
+        self._dibujar_ecg_y_rr()
+        self._dibujar_features()
+        self._llenar_tabla()
+
+    def _actualizar_resumen(self, record, ucd):
+        self.lbl_grupo.setText('UCDDB' if ucd else 'Apnea-ECG')
+        if ucd:
+            self.lbl_clase_real.setText('(sin clase de sujeto)')
+        else:
+            g = clasificar_grupo(record)
+            self.lbl_clase_real.setText({'apnea': 'A', 'borderline': 'B',
+                                         'control': 'C'}.get(g, '-'))
+        dur = float(self._cache['duracion_s']) / 60
+        self.lbl_duracion.setText(f'{dur:.0f} min')
+        # FC media a partir de rr_interp
+        rr = self._cache['rr_interp']
+        rr = rr[(rr > 0.3) & (rr < 2.0)]
+        if len(rr):
+            self.lbl_fc_media.setText(f'{60/np.mean(rr):.0f} lpm')
+        n_out = int(np.sum(self._cache['flag_total']))
+        n_tot = len(self._cache['rr_crudo'])
+        self.lbl_n_outliers.setText(f'{n_out} / {n_tot} ({100*n_out/n_tot:.1f}%)')
+
+        # prediccion nivel sujeto
+        if 'pred' in self._feat.columns:
+            lab = self._feat['label']
+            n_real = int((lab == 'A').sum())
+            n_pred = int((self._feat['pred'] == 1).sum())
+            n_min = len(self._feat)
+            self.lbl_min_apnea_real.setText(f'{n_real} min')
+            self.lbl_min_apnea_pred.setText(f'{n_pred} min')
+            self.lbl_ahi_est.setText(f'{100*n_pred/n_min:.1f}% de la noche')
+
+    def _dibujar_ecg_y_rr(self):
+        self.plot_ecg.clear()
+        self.plot_rr.clear()
+        if self._ecg is None:
+            return
+        t = np.arange(len(self._ecg)) / self._fs
+        self.plot_ecg.plot(t, self._ecg, pen=pg.mkPen('#2f5d9e', width=1))
+        picos = np.asarray(self._cache['picos_R']).astype(int)
+        picos = picos[picos < len(self._ecg)]
+        self.plot_ecg.plot(t[picos], self._ecg[picos], pen=None, symbol='o',
+                           symbolBrush=(220, 40, 40), symbolPen=pg.mkPen('w', width=1),
+                           symbolSize=7)
+        # tacograma
+        picos_R = np.asarray(self._cache['picos_R']).astype(int)
+        rr = np.asarray(self._cache['rr_crudo'])
+        flag = np.asarray(self._cache['flag_total']).astype(bool)
+        if len(picos_R) >= 2 and len(rr) >= 1:
+            t_rr = picos_R[1:len(rr)+1] / self._fs
+            n = min(len(t_rr), len(rr), len(flag))
+            t_rr, rr, flag = t_rr[:n], rr[:n], flag[:n]
+            self.plot_rr.plot(t_rr, rr, pen=pg.mkPen('#666', width=1))
+            if flag.any():
+                self.plot_rr.plot(t_rr[flag], rr[flag], pen=None, symbol='x',
+                                  symbolBrush=(220, 40, 40), symbolSize=9)
+            # Fijar el eje Y a un rango fisiologico. La serie cruda (rr_crudo)
+            # contiene intervalos no fisiologicos (detecciones perdidas/dobles)
+            # que llegan a miles de segundos; sin acotar el eje, aplastan los RR
+            # normales (~0.8 s) en una linea plana. Los limitamos a [0, 2] s.
+            self.plot_rr.setYRange(0, 2.0, padding=0.05)
+            self.plot_rr.disableAutoRange(axis=pg.ViewBox.YAxis)
+
+    def _dibujar_features(self):
+        self.plot_features.clear()
+        if self._feat is None or len(self._feat) == 0:
+            return
+        minutos = self._feat['minute'].values
+        # fondo por prediccion del modelo
+        if 'pred' in self._feat.columns:
+            for _, row in self._feat.iterrows():
+                if row.get('pred') == 1:
+                    reg = pg.LinearRegionItem(
+                        values=[row['minute'] - 0.5, row['minute'] + 0.5],
+                        brush=(255, 210, 210, 80), movable=False)
+                    reg.setZValue(-10)
+                    self.plot_features.addItem(reg)
+        # features z-norm
+        colores = {'cvhr_norm': '#1f77b4', 'lf_hf_ratio': '#ff7f0e',
+                   'wav_energy_L5': '#2ca02c'}
+        for feat, color in colores.items():
+            if feat not in self._feat.columns:
                 continue
-            try:
-                return {
-                    'duracion_min': int(partes[1]),
-                    'no_apnea_min': int(partes[2]),
-                    'apnea_min':    int(partes[3]),
-                    'horas_con_apnea': int(partes[4]),
-                    'AI': float(partes[5]), 'HI': float(partes[6]), 'AHI': float(partes[7]),
-                    'edad': int(partes[8]), 'sexo': partes[9],
-                    'altura_cm': int(partes[10]), 'peso_kg': int(partes[11]),
-                }
-            except ValueError:
-                return None
-    return None
+            x = self._feat[feat].values.astype(float)
+            med = np.nanmedian(x)
+            mad = np.nanmedian(np.abs(x - med)) + 1e-9
+            z = (x - med) / (1.4826 * mad)
+            self.plot_features.plot(minutos, z, pen=pg.mkPen(color, width=2),
+                                    name=FEATURE_LABELS.get(feat, feat))
+        # marcas de apnea real
+        if 'label' in self._feat.columns:
+            ap = self._feat[self._feat['label'] == 'A']['minute'].values
+            for m in ap:
+                ln = pg.InfiniteLine(pos=m, angle=90,
+                                     pen=pg.mkPen((200, 60, 60, 120), width=1, style=Qt.DotLine))
+                self.plot_features.addItem(ln)
+        self._marca_minuto = pg.InfiniteLine(pos=0, angle=90,
+                                             pen=pg.mkPen('#111', width=2))
+        self.plot_features.addItem(self._marca_minuto)
+
+    def _llenar_tabla(self):
+        self.tabla.setModel(TablaMinutosModel(self._feat))
+
+    def _on_tabla_click(self, index):
+        row = index.row()
+        if self._feat is None or row >= len(self._feat):
+            return
+        minuto = int(self._feat.iloc[row]['minute'])
+        # zoom al minuto en ECG/tacograma
+        self.plot_ecg.setXRange(minuto * 60, (minuto + 1) * 60, padding=0.02)
+        if self._marca_minuto is not None:
+            self._marca_minuto.setPos(minuto)
 
 
-class Monitor(QtWidgets.QMainWindow):
+# =============================================================================
+# SOLAPA MEDICA (solo Apnea-ECG)
+# =============================================================================
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle(f'Monitor ECG — noche completa — {RECORD}')
-        self.resize(1400, 720)
+class SolapaMedica(QWidget):
+    """Vista clinica/tamizaje: timeline de la noche, datos del paciente,
+    resumen a nivel sujeto y explicabilidad de features del minuto.
+    Solo aplica a Apnea-ECG (UCDDB no tiene datos clinicos de paciente)."""
 
-        # --- ECG filtrado ---
-        ecg_raw, _, _ = cargar_ecg(RECORD, DATA_DIR)
-        self.ecg = filtrar_ecg_general(ecg_raw, FS)
-        self.t   = np.arange(len(self.ecg)) / FS
+    N_FEATURES_PANEL = 12
 
-        # --- Picos R desde el cache ---
-        cache = np.load(os.path.join(CACHE_DIR, f'{RECORD}.npz'))
-        self.picos = np.asarray(cache['picos_R']).astype(int)
+    def __init__(self, datos, parent=None):
+        super().__init__(parent)
+        self.datos = datos
+        self._record = None
+        self._ecg = None
+        self._feat = None
+        self._pred = None
+        self._min_sel = None
+        self._build_ui()
 
-        # --- Predicciones por minuto (out-of-fold) de este registro ---
-        pred = pd.read_csv(os.path.join(CACHE_DIR, 'oof_predicciones.csv'))
-        self.pred = pred[pred['record'] == RECORD].sort_values('minute').reset_index(drop=True)
-        self.pred_idx = self.pred.set_index('minute') if len(self.pred) else self.pred
+    def _build_ui(self):
+        self.stack = QtWidgets.QStackedLayout(self)
 
-        # --- Features por minuto de este registro ---
-        feats = pd.read_csv(os.path.join(CACHE_DIR, 'features_apnea.csv'))
-        self.features = feats[feats['record'] == RECORD].sort_values('minute').reset_index(drop=True)
-        self.feat_idx = self.features.set_index('minute') if len(self.features) else self.features
+        # Pagina 0: aviso para UCDDB
+        self.aviso = QLabel(
+            'La vista clínica no está disponible para registros de UCDDB.\n\n'
+            'No se dispone de los datos clínicos del paciente (edad, sexo, '
+            'AHI de referencia) necesarios para el tamizaje médico.\n'
+            'Seleccioná un registro de Apnea-ECG (a/b/c) para ver esta solapa.')
+        self.aviso.setAlignment(Qt.AlignCenter)
+        self.aviso.setWordWrap(True)
+        self.aviso.setStyleSheet('color:#667; font-size:14px; padding:40px;')
+        w_aviso = QWidget(); la = QVBoxLayout(w_aviso); la.addWidget(self.aviso)
+        self.stack.addWidget(w_aviso)
 
-        # --- Referencia global normal/apnea por feature + importancia del modelo ---
-        self.ranking = pd.read_csv(os.path.join(CACHE_DIR, 'ranking_features.csv')).set_index('feature')
-        importancias = pd.read_csv(os.path.join(CACHE_DIR, 'importancias.csv'))
-        importancias = importancias.sort_values('importancia', ascending=False)
-        self.orden_features = [f for f in importancias['feature'].tolist()][:N_FEATURES_PANEL]
+        # Pagina 1: la vista medica
+        w_med = QWidget()
+        main = QHBoxLayout(w_med)
 
-        # --- Datos del paciente ---
-        self.info_paciente = _cargar_info_paciente(RECORD, DATA_DIR)
+        # izquierda: ECG del minuto + timeline
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        self.lbl_fc = QLabel('Minuto seleccionado')
+        self.lbl_fc.setAlignment(Qt.AlignCenter)
+        self.lbl_fc.setStyleSheet('font-size: 20px; font-weight: bold; color:#c02020;')
+        ll.addWidget(self.lbl_fc)
 
-        self._minuto_mostrado = None
+        self.plot_ecg = pg.PlotWidget(title='ECG del minuto seleccionado')
+        self.plot_ecg.setLabel('left', 'ECG (mV)')
+        self.plot_ecg.setLabel('bottom', 'Tiempo (s)')
+        self.plot_ecg.showGrid(x=True, y=True, alpha=0.3)
+        ll.addWidget(self.plot_ecg, stretch=1)
 
-        # ================= Layout =================
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        outer = QtWidgets.QHBoxLayout(central)
+        ll.addWidget(QLabel('<b>Noche completa</b> — click para inspeccionar un minuto'))
+        self.lbl_resumen_timeline = QLabel('')
+        ll.addWidget(self.lbl_resumen_timeline)
+        ll.addWidget(QLabel('Predicción del modelo'))
+        self.timeline_pred = self._crear_tira(eje_x=False)
+        ll.addWidget(self.timeline_pred)
+        ll.addWidget(QLabel('Etiqueta clínica real'))
+        self.timeline_real = self._crear_tira(eje_x=True)
+        ll.addWidget(self.timeline_real)
+        main.addWidget(left, stretch=1)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        outer.addWidget(splitter)
+        # derecha: paciente + resumen + features
+        right = QWidget()
+        right.setMaximumWidth(380)
+        rl = QVBoxLayout(right)
 
-        splitter.addWidget(self._crear_panel_izquierdo())
-        splitter.addWidget(self._crear_panel_derecho())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        self.gb_paciente = QGroupBox('Paciente')
+        fp = QFormLayout(self.gb_paciente)
+        self.lbl_edad = QLabel('-'); self.lbl_sexo = QLabel('-')
+        self.lbl_altura = QLabel('-'); self.lbl_peso = QLabel('-')
+        self.lbl_ahi = QLabel('-'); self.lbl_dur = QLabel('-')
+        fp.addRow('Edad:', self.lbl_edad); fp.addRow('Sexo:', self.lbl_sexo)
+        fp.addRow('Altura:', self.lbl_altura); fp.addRow('Peso:', self.lbl_peso)
+        fp.addRow('AHI / AI / HI real:', self.lbl_ahi)
+        fp.addRow('Duración:', self.lbl_dur)
+        rl.addWidget(self.gb_paciente)
 
-        self._llenar_panel_paciente()
-        self._construir_timeline()
+        gb_res = QGroupBox('Resumen del registro (nivel sujeto)')
+        fr = QFormLayout(gb_res)
+        self.lbl_res_real = QLabel('-'); self.lbl_res_pred = QLabel('-')
+        self.lbl_res_ahi = QLabel('-')
+        fr.addRow('Apnea real (clínica):', self.lbl_res_real)
+        fr.addRow('Apnea predicha (modelo):', self.lbl_res_pred)
+        fr.addRow('AHI estimado (modelo):', self.lbl_res_ahi)
+        nota = QLabel('* Referencia clínica: AHI ≥ 5 sugiere apnea. Es la tasa '
+                      'de minutos predichos, no un diagnóstico.')
+        nota.setWordWrap(True); nota.setStyleSheet('color:#889; font-size:10px;')
+        fr.addRow(nota)
+        rl.addWidget(gb_res)
 
-        # --- Estado del reproductor ---
-        self.N    = int(VENTANA_S * FS)
-        self.step = max(1, int(FS * DT_MS / 1000 * VELOCIDAD))
-        self.i    = self.N
+        gb_min = QGroupBox('Minuto seleccionado')
+        fm = QFormLayout(gb_min)
+        self.lbl_min_num = QLabel('-'); self.lbl_min_real = QLabel('-')
+        self.lbl_min_pred = QLabel('-')
+        fm.addRow('Minuto:', self.lbl_min_num)
+        fm.addRow('Etiqueta real:', self.lbl_min_real)
+        fm.addRow('Predicción modelo:', self.lbl_min_pred)
+        rl.addWidget(gb_min)
 
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self._tick)
-        self.timer.start(DT_MS)
+        gb_feat = QGroupBox('¿Por qué apnea? — features vs. referencia')
+        vf = QVBoxLayout(gb_feat)
+        self.tbl_feat = QTableWidget(0, 3)
+        self.tbl_feat.setHorizontalHeaderLabels(['Feature', 'Valor', 'Normal ⟷ Apnea'])
+        self.tbl_feat.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_feat.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl_feat.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tbl_feat.verticalHeader().setVisible(False)
+        self.tbl_feat.verticalHeader().setDefaultSectionSize(36)
+        self.tbl_feat.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_feat.setSelectionMode(QAbstractItemView.NoSelection)
+        vf.addWidget(self.tbl_feat)
+        rl.addWidget(gb_feat, stretch=1)
 
-        self._draw_frame()
+        main.addWidget(right)
+        self.stack.addWidget(w_med)
 
-    # ---------------------------------------------------------------------
-    # Construccion de la UI
-    # ---------------------------------------------------------------------
-    def _crear_panel_izquierdo(self):
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        # FC arriba
-        self.lbl_fc = QtWidgets.QLabel('-- bpm')
-        self.lbl_fc.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_fc.setStyleSheet(
-            'font-size: 34px; font-weight: bold; color: #c02020; padding: 4px;')
-        layout.addWidget(self.lbl_fc)
-
-        # ECG en el medio — zoom horizontal libre (rueda / arrastre). El eje
-        # Y se reescala solo, siempre, para ajustarse a lo que este visible
-        # en pantalla (nunca queda espacio muerto ni se recorta la señal).
-        self.plot = pg.PlotWidget()
-        self.plot.setLabel('left', 'ECG (mV)')
-        self.plot.setLabel('bottom', 'Tiempo (s)')
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
-        self.plot.setMouseEnabled(x=True, y=False)
-        layout.addWidget(self.plot, stretch=1)
-
-        self.curve = self.plot.plot(pen=pg.mkPen('#2f5d9e', width=1))
-        self.curve_r = self.plot.plot(
-            pen=None, symbol='o', symbolBrush=(220, 40, 40),
-            symbolPen=pg.mkPen('w', width=1), symbolSize=11)
-
-        self.plot.getViewBox().sigXRangeChanged.connect(
-            lambda vb, rng: self._auto_y_range(rng))
-
-        # Controles: anterior / pausa-reanuda / siguiente, agrupados y centrados
-        controles = QtWidgets.QHBoxLayout()
-        controles.setSpacing(14)
-
-        self.btn_prev = QtWidgets.QPushButton('◀  Apnea anterior')
-        self.btn_prev.setStyleSheet(ESTILO_BOTON_NAV)
-        self.btn_prev.setCursor(QtCore.Qt.PointingHandCursor)
-        self.btn_prev.clicked.connect(lambda: self._saltar_apnea(-1))
-
-        self.btn_play = QtWidgets.QPushButton('⏸')
-        self.btn_play.setFixedSize(48, 48)
-        self.btn_play.setStyleSheet(ESTILO_BOTON_PLAY)
-        self.btn_play.setCursor(QtCore.Qt.PointingHandCursor)
-        self.btn_play.setToolTip('Pausar')
-        self.btn_play.clicked.connect(self._toggle_play)
-
-        self.btn_next = QtWidgets.QPushButton('Apnea siguiente  ▶')
-        self.btn_next.setStyleSheet(ESTILO_BOTON_NAV)
-        self.btn_next.setCursor(QtCore.Qt.PointingHandCursor)
-        self.btn_next.clicked.connect(lambda: self._saltar_apnea(+1))
-
-        controles.addStretch(1)
-        controles.addWidget(self.btn_prev)
-        controles.addWidget(self.btn_play)
-        controles.addWidget(self.btn_next)
-        controles.addStretch(1)
-        layout.addLayout(controles)
-
-        # Timeline: DOS TIRAS separadas y bien identificadas, cada una clickeable
-        layout.addWidget(QtWidgets.QLabel(
-            '<b>Noche completa</b> — click en cualquiera de las dos tiras para saltar a ese minuto'))
-        self.lbl_resumen_timeline = QtWidgets.QLabel('')
-        layout.addWidget(self.lbl_resumen_timeline)
-
-        lbl_pred = QtWidgets.QLabel('Predicción del modelo')
-        lbl_pred.setStyleSheet('font-weight:600; color:#d0d4de;')
-        layout.addWidget(lbl_pred)
-        self.timeline_pred = self._crear_tira_timeline(eje_x=False)
-        layout.addWidget(self.timeline_pred)
-
-        lbl_real = QtWidgets.QLabel('Etiqueta clínica real')
-        lbl_real.setStyleSheet('font-weight:600; color:#d0d4de; margin-top:4px;')
-        layout.addWidget(lbl_real)
-        self.timeline_real = self._crear_tira_timeline(eje_x=True)
-        layout.addWidget(self.timeline_real)
-
-        return panel
-
-    def _crear_tira_timeline(self, eje_x, alto_min=38, alto_max=46):
+    def _crear_tira(self, eje_x, alto=44):
         w = pg.PlotWidget()
-        w.setMinimumHeight(alto_min)
-        w.setMaximumHeight(alto_max)
+        w.setMinimumHeight(alto); w.setMaximumHeight(alto + 6)
         w.getPlotItem().hideAxis('left')
         if eje_x:
             w.setLabel('bottom', 'Minuto')
@@ -323,143 +657,89 @@ class Monitor(QtWidgets.QMainWindow):
         w.setMouseEnabled(x=False, y=False)
         return w
 
-    def _crear_panel_derecho(self):
-        panel = QtWidgets.QWidget()
-        panel.setMaximumWidth(380)
-        layout = QtWidgets.QVBoxLayout(panel)
-
-        # --- Datos del paciente ---
-        grupo_paciente = QtWidgets.QGroupBox(f'Paciente — registro {RECORD}')
-        form = QtWidgets.QFormLayout(grupo_paciente)
-        self.lbl_pac_edad = QtWidgets.QLabel('-')
-        self.lbl_pac_sexo = QtWidgets.QLabel('-')
-        self.lbl_pac_altura = QtWidgets.QLabel('-')
-        self.lbl_pac_peso = QtWidgets.QLabel('-')
-        self.lbl_pac_ahi = QtWidgets.QLabel('-')
-        self.lbl_pac_duracion = QtWidgets.QLabel('-')
-        form.addRow('Edad:', self.lbl_pac_edad)
-        form.addRow('Sexo:', self.lbl_pac_sexo)
-        form.addRow('Altura:', self.lbl_pac_altura)
-        form.addRow('Peso:', self.lbl_pac_peso)
-        form.addRow('AHI / AI / HI real:', self.lbl_pac_ahi)
-        form.addRow('Duracion registro:', self.lbl_pac_duracion)
-        layout.addWidget(grupo_paciente)
-
-        # --- Resumen agregado a nivel sujeto: cuenta TODOS los minutos
-        # predichos como apnea, aunque sean pocos y el registro sea en su
-        # mayoria normal (para no "perder" apneas aisladas / falsos positivos).
-        grupo_resumen = QtWidgets.QGroupBox('Resumen del registro (nivel sujeto)')
-        form_r = QtWidgets.QFormLayout(grupo_resumen)
-        self.lbl_resumen_real = QtWidgets.QLabel('-')
-        self.lbl_resumen_pred = QtWidgets.QLabel('-')
-        self.lbl_resumen_ahi = QtWidgets.QLabel('-')
-        form_r.addRow('Apnea real (clinica):', self.lbl_resumen_real)
-        form_r.addRow('Apnea predicha (modelo):', self.lbl_resumen_pred)
-        form_r.addRow('AHI estimado (modelo):', self.lbl_resumen_ahi)
-        nota = QtWidgets.QLabel(
-            '* Referencia clínica: AHI ≥ 5 sugiere apnea. El umbral calibrado '
-            'por sujeto (paso 6 del proyecto) todavía no está implementado; '
-            'esto es solo la tasa de minutos predichos, no un diagnóstico.')
-        nota.setWordWrap(True)
-        nota.setStyleSheet('color:#8890a0; font-size:10px;')
-        form_r.addRow(nota)
-        layout.addWidget(grupo_resumen)
-
-        # --- Minuto seleccionado ---
-        grupo_minuto = QtWidgets.QGroupBox('Minuto en pantalla')
-        form2 = QtWidgets.QFormLayout(grupo_minuto)
-        self.lbl_min_num = QtWidgets.QLabel('-')
-        self.lbl_min_real = QtWidgets.QLabel('-')
-        self.lbl_min_pred = QtWidgets.QLabel('-')
-        form2.addRow('Minuto:', self.lbl_min_num)
-        form2.addRow('Etiqueta real:', self.lbl_min_real)
-        form2.addRow('Prediccion modelo:', self.lbl_min_pred)
-        layout.addWidget(grupo_minuto)
-
-        # --- Features del minuto vs. referencia normal/apnea ---
-        grupo_feat = QtWidgets.QGroupBox('¿Por que apnea? — features vs. referencia global')
-        v = QtWidgets.QVBoxLayout(grupo_feat)
-        self.tbl_features = QtWidgets.QTableWidget(0, 3)
-        self.tbl_features.setHorizontalHeaderLabels(['Feature', 'Valor', 'Normal  ⟷  Apnea'])
-        self.tbl_features.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.tbl_features.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        self.tbl_features.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
-        self.tbl_features.verticalHeader().setVisible(False)
-        self.tbl_features.verticalHeader().setDefaultSectionSize(36)
-        self.tbl_features.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.tbl_features.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.tbl_features.setToolTip(
-            'El punto ubica el valor actual entre el promedio típico en minutos '
-            'normales (verde, izquierda) y en minutos con apnea (rojo, derecha).')
-        v.addWidget(self.tbl_features)
-        layout.addWidget(grupo_feat, stretch=1)
-
-        return panel
-
-    def _llenar_panel_paciente(self):
-        info = self.info_paciente
-        if info is None:
-            self.lbl_pac_edad.setText('sin datos')
-            return
-        self.lbl_pac_edad.setText(f"{info['edad']} años")
-        self.lbl_pac_sexo.setText('Masculino' if info['sexo'] == 'M' else 'Femenino')
-        self.lbl_pac_altura.setText(f"{info['altura_cm']} cm")
-        self.lbl_pac_peso.setText(f"{info['peso_kg']} kg")
-        self.lbl_pac_ahi.setText(f"{info['AHI']:.1f} / {info['AI']:.1f} / {info['HI']:.1f}")
-        self.lbl_pac_duracion.setText(f"{info['duracion_min']} min "
-                                       f"({info['apnea_min']} min con apnea, "
-                                       f"{info['horas_con_apnea']} h con apnea)")
-
     # ---------------------------------------------------------------------
-    def _construir_timeline(self):
-        """Pinta las dos tiras (predicho / real), con cursor sincronizado y
-        clicks para saltar de minuto. Tambien llena el resumen a nivel
-        sujeto: CUALQUIER minuto predicho como apnea se cuenta ahi, aunque
-        sea uno solo y el registro sea en su mayoria normal."""
-        if len(self.pred) == 0 or 'pred' not in self.pred.columns:
+    def cargar_registro(self, record):
+        self._record = record
+        if es_ucd(record):
+            self.stack.setCurrentIndex(0)   # aviso
             return
-        preds = self.pred['pred'].fillna(0).astype(int).values
-        hay_real = 'y_true' in self.pred.columns
-        reales = self.pred['y_true'].fillna(0).astype(int).values if hay_real else None
-        min0 = int(self.pred['minute'].min())
-        n = len(preds)
-        self._min0_timeline = min0
-        self._n_timeline = n
+        self.stack.setCurrentIndex(1)
+
+        # ECG
+        ecg_raw, _, _ = cargar_ecg(record, DATA_DIR)
+        self._ecg = filtrar_ecg_general(ecg_raw, FS)
+
+        # features + predicciones de este registro
+        feats = self.datos.features_apnea
+        preds = self.datos.pred_apnea
+        self._feat = feats[feats['record'] == record].sort_values('minute').reset_index(drop=True)
+        self._pred = preds[preds['record'] == record].sort_values('minute').reset_index(drop=True) \
+            if preds is not None else pd.DataFrame()
+        self._feat_idx = self._feat.set_index('minute')
+
+        # paciente
+        info = _cargar_info_paciente(record, DATA_DIR)
+        if info:
+            self.lbl_edad.setText(f"{info['edad']} años")
+            self.lbl_sexo.setText('Masculino' if info['sexo'] == 'M' else 'Femenino')
+            self.lbl_altura.setText(f"{info['altura_cm']} cm")
+            self.lbl_peso.setText(f"{info['peso_kg']} kg")
+            self.lbl_ahi.setText(f"{info['AHI']:.1f} / {info['AI']:.1f} / {info['HI']:.1f}")
+            self.lbl_dur.setText(f"{info['duracion_min']} min")
+        else:
+            for l in [self.lbl_edad, self.lbl_sexo, self.lbl_altura,
+                      self.lbl_peso, self.lbl_ahi, self.lbl_dur]:
+                l.setText('sin datos')
+
+        self._construir_timeline()
+        # mostrar el primer minuto con apnea predicha, o el 0
+        if len(self._pred) and (self._pred['pred'] == 1).any():
+            m0 = int(self._pred[self._pred['pred'] == 1]['minute'].iloc[0])
+        else:
+            m0 = int(self._feat['minute'].iloc[0]) if len(self._feat) else 0
+        self._mostrar_minuto(m0)
+
+    def _construir_timeline(self):
+        for tl in (self.timeline_pred, self.timeline_real):
+            tl.clear()
+        if len(self._pred) == 0:
+            return
+        preds = self._pred['pred'].fillna(0).astype(int).values
+        hay_real = 'y_true' in self._pred.columns
+        reales = self._pred['y_true'].fillna(0).astype(int).values if hay_real else None
+        min0 = int(self._pred['minute'].min()); n = len(preds)
+        self._min0, self._n = min0, n
 
         self._pintar_tira(self.timeline_pred, preds, min0, n)
-        self.cursor_pred = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#1040c0', width=2))
+        self.cursor_pred = pg.InfiniteLine(angle=90, pen=pg.mkPen('#1040c0', width=2))
         self.timeline_pred.addItem(self.cursor_pred)
         self.timeline_pred.scene().sigMouseClicked.connect(
-            lambda ev: self._click_en_tira(ev, self.timeline_pred))
-        self.cursores = [self.cursor_pred]
+            lambda ev: self._click_tira(ev, self.timeline_pred))
 
+        self.cursores = [self.cursor_pred]
         if hay_real:
             self._pintar_tira(self.timeline_real, reales, min0, n)
-            self.cursor_real = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#1040c0', width=2))
+            self.cursor_real = pg.InfiniteLine(angle=90, pen=pg.mkPen('#1040c0', width=2))
             self.timeline_real.addItem(self.cursor_real)
             self.timeline_real.scene().sigMouseClicked.connect(
-                lambda ev: self._click_en_tira(ev, self.timeline_real))
+                lambda ev: self._click_tira(ev, self.timeline_real))
             self.cursores.append(self.cursor_real)
+            self.timeline_real.show()
         else:
             self.timeline_real.hide()
 
-        n_pred_apnea = int(preds.sum())
-        texto = f'{n_pred_apnea}/{n} min predichos como apnea ({100*n_pred_apnea/n:.1f}%)'
+        n_pa = int(preds.sum())
+        txt = f'{n_pa}/{n} min predichos apnea ({100*n_pa/n:.1f}%)'
+        self.lbl_res_pred.setText(f'{n_pa}/{n} min ({100*n_pa/n:.1f}%)')
+        horas = len(self._ecg) / FS / 3600
+        self.lbl_res_ahi.setText(f'{n_pa/horas:.1f} min-apnea/h' if horas > 0 else '-')
         if hay_real:
-            n_real_apnea = int(reales.sum())
-            texto += f'   |   {n_real_apnea}/{n} min reales con apnea ({100*n_real_apnea/n:.1f}%)'
-        self.lbl_resumen_timeline.setText(texto)
-
-        # --- Resumen a nivel sujeto (panel derecho) ---
-        horas = len(self.ecg) / FS / 3600
-        ahi_estimado = n_pred_apnea / horas if horas > 0 else float('nan')
-        self.lbl_resumen_pred.setText(f'{n_pred_apnea}/{n} min ({100*n_pred_apnea/n:.1f}%)')
-        self.lbl_resumen_ahi.setText(f'{ahi_estimado:.1f} min-apnea/h')
-        if hay_real:
-            n_real_apnea = int(reales.sum())
-            self.lbl_resumen_real.setText(f'{n_real_apnea}/{n} min ({100*n_real_apnea/n:.1f}%)')
+            n_ra = int(reales.sum())
+            txt += f'   |   {n_ra}/{n} min reales ({100*n_ra/n:.1f}%)'
+            self.lbl_res_real.setText(f'{n_ra}/{n} min ({100*n_ra/n:.1f}%)')
         else:
-            self.lbl_resumen_real.setText('sin datos')
+            self.lbl_res_real.setText('sin datos')
+        self.lbl_resumen_timeline.setText(txt)
 
     def _pintar_tira(self, widget, valores, min0, n):
         img = np.zeros((n, 1, 4), dtype=np.ubyte)
@@ -472,172 +752,171 @@ class Monitor(QtWidgets.QMainWindow):
         widget.setYRange(0, 1, padding=0)
         widget.setXRange(min0, min0 + n, padding=0)
 
-    def _click_en_tira(self, event, widget):
-        if event.button() != QtCore.Qt.LeftButton:
+    def _click_tira(self, event, widget):
+        if event.button() != Qt.LeftButton:
             return
         vb = widget.getPlotItem().vb
         pos = vb.mapSceneToView(event.scenePos())
-        self._ir_a_minuto(pos.x())
+        m = int(round(pos.x()))
+        m = int(np.clip(m, self._min0, self._min0 + self._n - 1))
+        self._mostrar_minuto(m)
 
-    # ---------------------------------------------------------------------
-    # Navegacion
-    # ---------------------------------------------------------------------
-    def _ir_a_minuto(self, minuto):
-        min0 = getattr(self, '_min0_timeline', 0)
-        n = getattr(self, '_n_timeline', None)
-        minuto = int(round(minuto))
-        if n is not None:
-            minuto = int(np.clip(minuto, min0, min0 + n - 1))
-        else:
-            minuto = max(0, minuto)
-
-        idx = int(np.clip(minuto * 60 * FS, self.N, len(self.ecg) - 1))
-        self.i = idx
-        self._pausar()
-        self._minuto_mostrado = None   # fuerza refresco del panel
-        self._draw_frame()
-
-    def _saltar_apnea(self, direccion):
-        if not hasattr(self.pred_idx, 'index') or 'pred' not in getattr(self.pred_idx, 'columns', []):
-            return
-        minutos_apnea = sorted(self.pred_idx.index[self.pred_idx['pred'] == 1].tolist())
-        if not minutos_apnea:
-            return
-        actual = self._minuto_mostrado if self._minuto_mostrado is not None else 0
-        if direccion > 0:
-            candidatos = [m for m in minutos_apnea if m > actual]
-            objetivo = candidatos[0] if candidatos else minutos_apnea[0]
-        else:
-            candidatos = [m for m in minutos_apnea if m < actual]
-            objetivo = candidatos[-1] if candidatos else minutos_apnea[-1]
-        self._ir_a_minuto(objetivo)
-
-    def _toggle_play(self):
-        if self.timer.isActive():
-            self._pausar()
-        else:
-            self._reanudar()
-
-    def _pausar(self):
-        self.timer.stop()
-        self.btn_play.setText('▶')
-        self.btn_play.setToolTip('Reanudar')
-
-    def _reanudar(self):
-        self.timer.start(DT_MS)
-        self.btn_play.setText('⏸')
-        self.btn_play.setToolTip('Pausar')
-
-    # ---------------------------------------------------------------------
-    # Reproduccion
-    # ---------------------------------------------------------------------
-    def _tick(self):
-        self.i += self.step
-        if self.i >= len(self.ecg):
-            self.i = self.N
-        self._draw_frame()
-
-    def _draw_frame(self):
-        lo = self.i - self.N
-        x = self.t[lo:self.i]
-        y = self.ecg[lo:self.i]
-        self.curve.setData(x, y)
-        self.plot.setXRange(x[0], x[-1], padding=0)
-
-        # R en la ventana
-        a = np.searchsorted(self.picos, lo)
-        b = np.searchsorted(self.picos, self.i)
-        pk = self.picos[a:b]
-        self.curve_r.setData(self.t[pk], self.ecg[pk])
-
-        # Cursor en ambas tiras de la timeline (minuto actual)
-        if hasattr(self, 'cursores'):
-            minuto_pos = self.i / FS / 60.0
-            for c in self.cursores:
-                c.setPos(minuto_pos)
-
-        self._actualizar_fc()
-
-        minuto_actual = int(self.i / FS / 60)
-        if minuto_actual != self._minuto_mostrado:
-            self._actualizar_panel_minuto(minuto_actual)
-            self._minuto_mostrado = minuto_actual
-
-    def _auto_y_range(self, rng):
-        """Reescala el eje Y del ECG para que siempre se ajuste a lo que
-        esta visible en el eje X (zoomear no deja espacio muerto ni recorta)."""
-        x0, x1 = rng
-        i0 = max(0, int(x0 * FS))
-        i1 = min(len(self.ecg), int(x1 * FS) + 1)
-        seg = self.ecg[i0:i1] if i1 > i0 else self.ecg
-        y_lo, y_hi = np.percentile(seg, [0.5, 99.5])
-        margen = 0.2 * (y_hi - y_lo) if y_hi > y_lo else 0.1
-        self.plot.setYRange(y_lo - margen, y_hi + margen, padding=0)
-
-    def _actualizar_fc(self):
-        b = np.searchsorted(self.picos, self.i)
-        if b < 2:
-            return
-        ultimos = self.picos[max(0, b - (N_PROMEDIO_FC + 1)):b]
-        rr = np.diff(ultimos) / FS
-        rr = rr[(rr > 0.3) & (rr < 2.0)]
-        if len(rr) == 0:
-            return
-        self.lbl_fc.setText(f'{60.0 / np.mean(rr):.0f} bpm')
-
-    # ---------------------------------------------------------------------
-    # Panel de explicabilidad (minuto + features)
-    # ---------------------------------------------------------------------
-    def _actualizar_panel_minuto(self, minuto):
-        hh, mm = divmod(minuto, 60)
-        self.lbl_min_num.setText(f'{minuto}  ({hh:02d}h{mm:02d}m)')
-
-        if minuto in self.pred_idx.index:
-            fila = self.pred_idx.loc[minuto]
-            etiqueta = fila.get('label', '?')
-            texto_real = 'APNEA' if etiqueta == 'A' else ('Normal' if etiqueta == 'N' else '?')
-            self.lbl_min_real.setText(texto_real)
+    def _mostrar_minuto(self, minuto):
+        self._min_sel = minuto
+        for c in getattr(self, 'cursores', []):
+            c.setPos(minuto + 0.5)
+        # ECG del minuto
+        self.plot_ecg.clear()
+        if self._ecg is not None:
+            i0, i1 = minuto * 60 * FS, (minuto + 1) * 60 * FS
+            i1 = min(i1, len(self._ecg))
+            if i0 < i1:
+                seg = self._ecg[i0:i1]
+                t = np.arange(len(seg)) / FS
+                self.plot_ecg.plot(t, seg, pen=pg.mkPen('#2f5d9e', width=1))
+        self.lbl_fc.setText(f'Minuto {minuto}')
+        self.lbl_min_num.setText(str(minuto))
+        # etiqueta y prediccion
+        fila = self._pred[self._pred['minute'] == minuto]
+        if len(fila):
+            fila = fila.iloc[0]
+            yt = fila.get('y_true', np.nan)
+            real = 'APNEA' if yt == 1 else 'Normal'
+            self.lbl_min_real.setText(real)
             self.lbl_min_real.setStyleSheet(
-                'font-weight:bold;color:#c02020' if texto_real == 'APNEA' else 'font-weight:bold;color:#207020')
-
-            pred = int(fila.get('pred', 0))
-            proba = fila.get('proba_apnea', np.nan)
-            texto_pred = f"{'APNEA' if pred == 1 else 'Normal'} (p={proba:.2f})"
-            self.lbl_min_pred.setText(texto_pred)
+                'font-weight:bold;color:#c02020' if real == 'APNEA' else 'font-weight:bold;color:#207020')
+            pr = int(fila.get('pred', 0)); proba = fila.get('proba_apnea', np.nan)
+            txt = f"{'APNEA' if pr == 1 else 'Normal'} (p={proba:.2f})"
+            self.lbl_min_pred.setText(txt)
             self.lbl_min_pred.setStyleSheet(
-                'font-weight:bold;color:#c02020' if pred == 1 else 'font-weight:bold;color:#207020')
-        else:
-            self.lbl_min_real.setText('sin datos')
-            self.lbl_min_pred.setText('sin datos')
-
+                'font-weight:bold;color:#c02020' if pr == 1 else 'font-weight:bold;color:#207020')
         self._llenar_tabla_features(minuto)
 
     def _llenar_tabla_features(self, minuto):
-        tabla = self.tbl_features
-        tabla.setRowCount(0)
-        if minuto not in self.feat_idx.index:
+        self.tbl_feat.setRowCount(0)
+        if minuto not in self._feat_idx.index:
             return
-        fila = self.feat_idx.loc[minuto]
-
-        for feat in self.orden_features:
+        fila = self._feat_idx.loc[minuto]
+        ranking = self.datos.ranking
+        orden = self.datos.orden_features[:self.N_FEATURES_PANEL]
+        for feat in orden:
             if feat not in fila.index:
                 continue
             val = fila[feat]
-            r = tabla.rowCount()
-            tabla.insertRow(r)
-            tabla.setItem(r, 0, QtWidgets.QTableWidgetItem(FEATURE_LABELS.get(feat, feat)))
-            tabla.setItem(r, 1, QtWidgets.QTableWidgetItem('-' if pd.isna(val) else f'{val:.3g}'))
+            r = self.tbl_feat.rowCount()
+            self.tbl_feat.insertRow(r)
+            self.tbl_feat.setItem(r, 0, QTableWidgetItem(FEATURE_LABELS.get(feat, feat)))
+            self.tbl_feat.setItem(r, 1, QTableWidgetItem('-' if pd.isna(val) else f'{val:.3g}'))
+            mn = ma = None
+            if ranking is not None and feat in ranking.index:
+                ref = ranking.loc[feat]
+                mn, ma = float(ref['media_N']), float(ref['media_A'])
+            self.tbl_feat.setCellWidget(r, 2, BarraComparacion(val, mn, ma))
 
-            media_n = media_a = None
-            if feat in self.ranking.index:
-                ref = self.ranking.loc[feat]
-                media_n, media_a = float(ref['media_N']), float(ref['media_A'])
-            tabla.setCellWidget(r, 2, BarraComparacion(val, media_n, media_a))
+
+# =============================================================================
+# Contenedor de datos compartidos (se cargan una sola vez)
+# =============================================================================
+
+class DatosCompartidos:
+    """Carga y guarda los CSV del cache que comparten las dos solapas."""
+
+    def __init__(self):
+        # Apnea-ECG
+        self.features_apnea = self._leer(os.path.join(CACHE_DIR, 'features_apnea.csv'))
+        self.pred_apnea = self._leer(os.path.join(CACHE_DIR, 'oof_predicciones.csv'))
+        # UCDDB (opcionales)
+        self.features_ucd = self._leer(os.path.join(CACHE_UCD_PROC, 'features_ucd.csv'))
+        self.pred_ucd = self._leer(os.path.join(CACHE_UCD_PROC, 'predicciones_ucd.csv'))
+        # referencia normal/apnea + orden por importancia
+        self.ranking = self._leer(os.path.join(CACHE_DIR, 'ranking_features.csv'))
+        if self.ranking is not None and 'feature' in self.ranking.columns:
+            self.ranking = self.ranking.set_index('feature')
+        imp = self._leer(os.path.join(CACHE_DIR, 'importancias.csv'))
+        if imp is not None:
+            imp = imp.sort_values('importancia', ascending=False)
+            self.orden_features = imp['feature'].tolist()
+        else:
+            self.orden_features = list(FEATURE_LABELS.keys())
+
+    @staticmethod
+    def _leer(path):
+        return pd.read_csv(path) if os.path.exists(path) else None
+
+    def lista_registros(self):
+        """Todos los registros disponibles, Apnea-ECG primero y UCDDB despues."""
+        regs = []
+        if self.features_apnea is not None:
+            regs += sorted(self.features_apnea['record'].unique().tolist())
+        if self.features_ucd is not None:
+            regs += sorted(self.features_ucd['record'].unique().tolist())
+        return regs
+
+
+# =============================================================================
+# Ventana principal con las dos solapas
+# =============================================================================
+
+class MainWindow(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Detección de apnea del sueño — visualización')
+        self.resize(1500, 900)
+
+        self.datos = DatosCompartidos()
+        if self.datos.features_apnea is None:
+            QMessageBox.critical(self, 'Error',
+                f'No se encontró {CACHE_DIR}/features_apnea.csv.\n'
+                'Correr el pipeline (04, 05) antes de abrir la interfaz.')
+            sys.exit(1)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        v = QVBoxLayout(central)
+
+        # --- Barra superior: selector compartido ---
+        top = QHBoxLayout()
+        top.addWidget(QLabel('<b>Registro:</b>'))
+        self.combo = QComboBox()
+        self.combo.addItems(self.datos.lista_registros())
+        self.combo.currentTextChanged.connect(self._cambiar_registro)
+        top.addWidget(self.combo)
+        top.addWidget(QLabel('  (a/b/c = Apnea-ECG · ucddb* = UCDDB)'))
+        top.addStretch()
+        v.addLayout(top)
+
+        # --- Solapas ---
+        self.tabs = QTabWidget()
+        self.solapa_tecnica = SolapaTecnica(self.datos)
+        self.solapa_medica = SolapaMedica(self.datos)
+        self.tabs.addTab(self.solapa_tecnica, 'Vista técnica')
+        self.tabs.addTab(self.solapa_medica, 'Vista clínica')
+        v.addWidget(self.tabs)
+
+        self.setStatusBar(QStatusBar())
+
+        if self.combo.count():
+            self._cambiar_registro(self.combo.currentText())
+
+    def _cambiar_registro(self, record):
+        if not record:
+            return
+        self.statusBar().showMessage(f'Cargando {record}...')
+        QApplication.processEvents()
+        try:
+            self.solapa_tecnica.cargar_registro(record)
+            self.solapa_medica.cargar_registro(record)
+            self.statusBar().showMessage(f'{record} — listo')
+        except Exception as e:
+            self.statusBar().showMessage(f'Error: {e}')
+            QMessageBox.warning(self, 'Error', f'No se pudo cargar {record}:\n{e}')
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    win = Monitor()
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    win = MainWindow()
     win.show()
     sys.exit(app.exec())
 

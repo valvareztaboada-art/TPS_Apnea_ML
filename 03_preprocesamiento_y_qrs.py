@@ -3,8 +3,7 @@
 Preprocesamiento + Pan-Tompkins: UCD en detalle + comparacion entre bases
 ==========================================================================
 
-Script EXPLORATORIO para generar las figuras del informe. Como el detalle de
-Pan-Tompkins sobre Apnea-ECG ya se mostro en el TP anterior (sujeto a01), aca:
+Script EXPLORATORIO para generar las figuras del informe. Vemos:
 
   1. Mostramos Pan-Tompkins ETAPA POR ETAPA sobre la base NUEVA (UCD), para
      evidenciar que el mismo detector se adapta bien a la otra base (otra
@@ -50,7 +49,7 @@ from src.pipeline import (
 DATA_DIR_APNEA = 'apnea-ecg-database-1.0.0'
 CACHE_DIR_UCD = 'cache_ucd'
 
-REG_APNEA = 'c04'
+REG_APNEA = 'c06'
 REG_UCD = 'ucddb002'
 
 # Ventana para visualizar las etapas de Pan-Tompkins (segundos)
@@ -61,7 +60,7 @@ MINUTO_VIZ = 30
 # Sujeto de Apnea-ECG con outliers de RR para la validacion manual de ectopicos
 # (la devolucion pedia verificar si los RR descartados eran ectopicos reales,
 # error de deteccion, o apnea que no habia que sacar). 
-REG_OUTLIERS = 'c04'
+REG_OUTLIERS = 'a05'
 # cuantos RR descartados inspeccionar en detalle (los de mayor desviacion)
 N_ECTOPICOS_VIZ = 6
 # ventana de ECG alrededor de cada RR descartado (segundos a cada lado)
@@ -404,7 +403,4 @@ print(f"{'FC med [lpm]':16s}{fc_a:>16.1f}{fc_u:>16.1f}")
 pa = 100*res_a['flags']['total'].sum()/len(res_a['rr_crudo'])
 pu = 100*res_u['flags']['total'].sum()/len(res_u['rr_crudo'])
 print(f"{'% descartado':16s}{pa:>16.2f}{pu:>16.2f}")
-print('=' * 70)
-print('Si el detector marca bien los R en UCD y el tacograma queda fisiologico,')
-print('el pipeline esta listo para procesar ambas bases en batch (03b).')
 print('=' * 70)

@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Analisis de discriminabilidad de features (responde la devolucion)
+Analisis de discriminabilidad de features 
 ===================================================================
 
 Lee cache/features_apnea.csv (learning set) y analiza cuanto discrimina cada
-feature entre Apnea (A) y Normal (N). Responde los comentarios de la profe:
-
-  - "el valor medio no es lo unico importante, el desvio tambien":
+feature entre Apnea (A) y Normal (N). Vemos:
     -> Cohen's d (diferencia de medias / desvio combinado) y AUC por feature.
-  - "faltó analisis visual de distribuciones por clase":
     -> boxplots / violines por clase + histogramas superpuestos.
-  - "hay alta superposicion entre las campanas":
     -> se cuantifica con AUC (cercano a 0.5 = mucho solapamiento) y se muestra.
 
 Ademas:
@@ -313,7 +309,7 @@ print()
 # Resumen para el informe
 # =============================================================================
 print('=' * 70)
-print('Resumen (para el informe)')
+print('Resumen')
 print('=' * 70)
 buenas = ranking[ranking['auc'] >= 0.60]['feature'].tolist()
 debiles = ranking[ranking['auc'] < 0.55]['feature'].tolist()

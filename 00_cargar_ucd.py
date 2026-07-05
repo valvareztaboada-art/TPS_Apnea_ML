@@ -8,29 +8,19 @@ formato EDF y a 128 Hz, con las anotaciones de eventos respiratorios en un .txt
 aparte (hora de inicio + duracion de cada evento). Este script:
 
   1. Lee el ECG mono-derivacion del .rec (canal 'ECG', 128 Hz).
-  2. Lo lleva a 100 Hz para que sea comparable con Apnea-ECG (mismo terreno de
-     features). Como 128->100 no es factor entero, se usa resample_poly.
-  3. Parsea el _respevt.txt y construye una etiqueta binaria por minuto
+  2. Lo lleva a 100 Hz para que sea comparable con Apnea-ECG. 
+     Como 128->100 no es factor entero, se usa resample_poly.
+  3. Construye una etiqueta binaria por minuto
      (A = algun evento respiratorio en ese minuto, N = ninguno), replicando
      el esquema minuto-a-minuto de Apnea-ECG.
-  4. (Opcional) lee el _stage.txt con las etapas de sueno. NO se usan para
-     filtrar (decision conservadora: tratamos toda la noche igual que
+  4. Lee el _stage.txt con las etapas de sueño. NO se usan para
+     filtrar (tratamos toda la noche igual que
      Apnea-ECG, que no trae etapas), pero se dejan disponibles.
-
-Decisiones de etiquetado (acordadas por el grupo):
-  - Cualquier tipo de evento respiratorio (HYP-*, APNEA-* obstructiva/central/
-    mixta, y respiracion periodica PB/CS si estuviera marcada) cuenta como A.
-    Es la misma definicion amplia de "disordered breathing" de Penzel.
-  - No se filtran los minutos de vigilia (Wake).
 
 Salida por sujeto: un dict con el ECG a 100 Hz y el vector de labels por minuto,
 en el mismo formato que despues consume el pipeline (filtros + Pan-Tompkins +
-features). Opcionalmente se cachea en cache_ucd/<record>.npz.
+features). En cache_ucd/<record>.npz.
 
-Verificado sobre ucddb002:
-  - EDF start 00:11:04, duracion 374.5 min, canal ECG en indice 5 a 128 Hz.
-  - respevt con tipos HYP-C/O/M y APNEA-O/M; ultimo evento en min 294 (dentro).
-  - stage: 748 epocas de 30 s = 374 min (coincide con la duracion del EDF).
 """
 
 import os
@@ -47,14 +37,9 @@ from scipy.signal import resample_poly
 # =============================================================================
 # Lector EDF minimo (numpy puro, sin dependencias externas)
 # =============================================================================
-# UCD viene en formato EDF (.rec). No usamos pyedflib ni mne para no sumar
-# dependencias que ademas fallan al compilar en Windows + Python nuevo. El
-# formato EDF es simple (header de texto de tamano fijo + datos int16), asi que
-# lo parseamos con numpy. Clave: EDF permite frecuencias distintas por canal;
-# leemos el canal de ECG a SU frecuencia real (128 Hz), sin mezclarlo con los
-# canales lentos (a diferencia de wfdb.read_edf, que remuestrea todo a la fs
-# base y destruiria la resolucion del ECG).
-# Spec: https://www.edfplus.info/specs/edf.html
+# UCD viene en formato EDF (.rec). El formato EDF es simple (header de texto de tamano fijo +
+# datos int16), asi que lo parseamos con numpy. 
+# Info en: https://www.edfplus.info/specs/edf.html
 
 def _leer_canal_edf(path, nombre_canal='ECG'):
     """Lee un canal especifico de un EDF respetando su frecuencia real.
@@ -141,8 +126,7 @@ def _leer_canal_edf(path, nombre_canal='ECG'):
 # Configuracion
 # =============================================================================
 
-# Carpeta donde estan los archivos de UCD (los .rec, _respevt.txt, _stage.txt).
-# En la compu del grupo la base esta en la carpeta 'files/'.
+# Carpeta donde estan los archivos de UCD 
 DATA_DIR_UCD = 'files'
 
 CACHE_DIR_UCD = 'cache_ucd'
@@ -289,7 +273,7 @@ def eventos_a_labels_por_minuto(eventos, start_dt, dur_s):
 
 
 # =============================================================================
-# Etapas de sueno (opcional, NO se usan para filtrar)
+# Etapas de sueño (opcional, NO se usan para filtrar)
 # =============================================================================
 
 def cargar_stages(record, data_dir=DATA_DIR_UCD):

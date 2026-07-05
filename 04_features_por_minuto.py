@@ -13,11 +13,7 @@ Decisiones (acordadas):
   - Se EXCLUYEN sujetos con > PCT_OUTLIERS_MAX % de RR no fisiologicos
     (fallo sistematico de deteccion o arritmia sostenida que invalida la HRV).
     Con 20% cae solo c04 (Apnea-ECG); ningun UCD supera el umbral.
-  - Se calculan features de TODOS los grupos validos (a/b/c). La clase B NO se
-    excluye aca: cada minuto de B tiene su etiqueta A/N valida y sirve para el
-    clasificador per-minuto. La decision de usar B o no (y de excluirla para la
-    evaluacion per-sujeto) se toma en el 05. Por eso guardamos 'record', 'grupo'
-    y 'base' en cada fila.
+  - Se calculan features de TODOS los grupos validos (a/b/c). 
   - EDR necesita el ECG (amplitud de R): se recarga al vuelo (wfdb para Apnea,
     cache RAW del 00 para UCD), se filtra igual, y se calculan las amplitudes.
 

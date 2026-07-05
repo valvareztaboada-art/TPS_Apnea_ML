@@ -7,12 +7,10 @@ Entrena y valida clasificadores para detectar apnea minuto a minuto, sobre el
 learning set (Apnea-ECG). El test externo (UCD) y la evaluacion per-sujeto van
 en el 06.
 
-Puntos metodologicos NO negociables:
+Puntos metodologicos:
   - StratifiedGroupKFold con grupo = sujeto. Los minutos de un sujeto estan
     correlacionados; si el mismo sujeto cae en train y validacion, las metricas
     se inflan (data leakage). Agrupar por sujeto lo evita.
-  - Imputacion + escalado DENTRO del Pipeline (se ajustan solo con el train de
-    cada fold). Nunca antes de dividir.
   - La clase B (borderline) SE USA en el entrenamiento per-minuto: cada minuto
     tiene su etiqueta A/N valida, sea o no borderline el sujeto. La ambiguedad
     de B es a nivel de SUJETO (sano/no sano), y eso solo afecta al 06.

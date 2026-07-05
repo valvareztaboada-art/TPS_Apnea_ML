@@ -25,7 +25,7 @@ Salida por sujeto (<cache>/<record>.npz):
   - qrs_ref          : (solo Apnea-ECG) anotaciones .qrs de referencia
   - labels           : (solo UCD) etiqueta 'A'/'N' por minuto
   - base             : 'apnea' o 'ucd'
-No se guarda la senal cruda ni la filtrada.
+No se guarda la señal cruda ni la filtrada.
 """
 
 import os

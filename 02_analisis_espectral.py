@@ -5,8 +5,7 @@ Analisis espectral comparativo: Apnea-ECG vs UCD
 
 Objetivo: verificar cuantitativamente que las dos bases son compatibles en el
 dominio de la frecuencia, y que los MISMOS filtros (Butterworth HP 0.5 + LP 40)
-sirven para ambas. Es el espejo del 02 original, pero superponiendo un registro
-de cada base en cada PSD.
+sirven para ambas.
 
 Tres preguntas que responde:
   1. El offset DC de UCD (~0.5 mV que vimos en el 01): aparece como energia en
@@ -14,14 +13,10 @@ Tres preguntas que responde:
   2. Red electrica a 50 Hz: Apnea-ECG (100 Hz) ya la tenia filtrada por Nyquist.
      UCD original a 128 Hz (Nyquist 64) PUDO registrar la red -> hay que mirar
      si aparece un pico en 50 Hz, para decidir si UCD necesita un notch ademas
-     del Butterworth. (Ojo: tras remuestrear a 100 Hz, 50 Hz queda justo en el
-     nuevo Nyquist; el resample_poly ya aplica anti-aliasing, pero verificamos.)
+     del Butterworth. 
   3. La banda del QRS (5-25 Hz): confirmar que cae en el mismo lugar en ambas
      bases (misma morfologia -> features comparables).
 
-Nota metodologica: para que la comparacion sea JUSTA, ambas senales se leen ya
-a 100 Hz (Apnea-ECG nativo; UCD del cache que genero el 00, ya remuestreado).
-Asi el eje de frecuencia llega al mismo Nyquist (50 Hz) en las dos.
 """
 
 import os
@@ -282,6 +277,4 @@ plt.tight_layout(); plt.show()
 
 print()
 print('=' * 70)
-print('Fin. Si tras el filtrado las PSD se parecen y no hay pico de red en UCD,')
-print('los mismos filtros sirven para las dos bases -> features comparables.')
-print('=' * 70)
+print('Fin.')

@@ -4,10 +4,7 @@ Exploracion inicial de las DOS bases de datos (Apnea-ECG + UCD)
 ================================================================
 
 Objetivo de este script: verificar que las DOS bases se cargan bien y comparar
-visualmente que las senales son compatibles antes de procesar. Mantiene la
-estructura del 01 original (verificacion + inventario + visualizacion +
-anotaciones), pero ahora muestra UN registro de CADA base en paralelo, para
-confirmar de un vistazo que:
+visualmente que las señales son compatibles antes de procesar. Busca confirmar que:
 
   - el ECG de UCD (tras pasar por 00_cargar_ucd.py: EDF -> 100 Hz) se parece
     al de Apnea-ECG,
@@ -28,11 +25,6 @@ Base 2 - UCD / St. Vincent's Dublin (PhysioNet), el TEST EXTERNO:
   - Se carga con 00_cargar_ucd.py (EDF -> canal ECG -> remuestreo a 100 Hz ->
     labels 'A'/'N' por minuto).
 
-Decisiones ya tomadas por el grupo:
-  - UCD se remuestrea de 128 a 100 Hz para igualar Apnea-ECG.
-  - Cualquier evento respiratorio (HYP/APNEA obstructiva/central/mixta, PB/CS)
-    cuenta como 'A' (misma definicion amplia que Penzel).
-  - No se filtran los minutos de vigilia (decision conservadora).
 """
 
 # =============================================================================
@@ -299,6 +291,4 @@ plt.tight_layout(); plt.show()
 print()
 print('=' * 70)
 print('Fin del script.')
-print('Si las dos senales se ven como ECG y las anotaciones caen donde deben,')
-print('las bases estan listas para el analisis espectral comparativo (02).')
-print('=' * 70)
+

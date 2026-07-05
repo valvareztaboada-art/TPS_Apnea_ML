@@ -3,14 +3,11 @@
 Evaluacion final: test externo (UCD) + clasificacion per-sujeto (Apnea-ECG)
 ============================================================================
 
-Cierra el trabajo con las dos evaluaciones que faltan:
-
   PARTE 1 - Test externo per-minuto en UCD (cross-database):
     Entrena con TODO Apnea-ECG (learning set, incluida B para per-minuto) y
     predice sobre UCD. Reporta la caida por cambio de dominio. Compara:
-      - modelo REDUCIDO con EDR   (el "oficial")
-      - modelo SIN EDR            (para ver que cae menos: el EDR no transfiere
-                                   bien por ser otra derivacion)
+      - modelo REDUCIDO con EDR   (el oficial)
+      - modelo SIN EDR            
 
   PARTE 2 - Clasificacion per-sujeto (solo Apnea-ECG, solo A y C):
     Usa las predicciones out-of-fold del 05 (sin leakage) para estimar, por
@@ -123,18 +120,18 @@ def parte1_test_ucd():
     print('=' * 70)
     print('PARTE 1: Test externo per-minuto en UCD (cross-database)')
     print('=' * 70)
-
+ 
     df_a = pd.read_csv(FEAT_APNEA)
     df_a = df_a[df_a['label'].isin(['A', 'N'])].copy()   # incluye B
     ya = (df_a['label'] == 'A').astype(int).values
-
+ 
     df_u = pd.read_csv(FEAT_UCD)
     df_u = df_u[df_u['label'].isin(['A', 'N'])].copy()
     yu = (df_u['label'] == 'A').astype(int).values
-
+ 
     print(f'Train (Apnea-ECG): {len(df_a)} min | Test (UCD): {len(df_u)} min')
     print()
-
+ 
     resultados = {}
     for nombre, feats in [('reducido CON EDR', FEATS_REDUCIDO),
                           ('SIN EDR', FEATS_SIN_EDR)]:
@@ -145,6 +142,18 @@ def parte1_test_ucd():
             proba_u = modelo.predict_proba(df_u[feats].values)[:, 1]  # predice UCD
         met = metricas_binarias(yu, proba_u)
         resultados[nombre] = {'proba': proba_u, 'met': met, 'feats': feats}
+ 
+        # Guardar las predicciones per-minuto del modelo OFICIAL (reducido CON
+        # EDR) sobre UCD, para que la interfaz las muestre. Mismas columnas que
+        # oof_predicciones.csv de Apnea-ECG, para leerlas igual en las dos bases.
+        if nombre == 'reducido CON EDR':
+            pred_ucd = df_u[['record', 'minute', 'label']].copy()
+            pred_ucd['y_true'] = yu
+            pred_ucd['proba_apnea'] = proba_u
+            pred_ucd['pred'] = (proba_u >= 0.5).astype(int)
+            pred_ucd.to_csv(os.path.join(CACHE_UCD, 'predicciones_ucd.csv'),
+                            index=False)
+ 
         print(f'[{nombre}] ({len(feats)} feats)')
         print(f'   umbral 0.5      -> AUC={met["auc"]:.3f}  F1-macro={met["f1_macro"]:.3f}  '
               f'recall_A={met["rec_A"]:.3f}  prec_A={met["prec_A"]:.3f}')
@@ -162,7 +171,7 @@ def parte1_test_ucd():
         print(f'   umbral maxF1  ({u_f1:.2f}) -> F1-macro={met_f["f1_macro"]:.3f}  '
               f'recall_A={met_f["rec_A"]:.3f}  prec_A={met_f["prec_A"]:.3f}')
         print()
-
+ 
     # comparar con el rendimiento interno (referencia del 05)
     print('Interpretacion:')
     auc_con = resultados['reducido CON EDR']['met']['auc']
@@ -184,7 +193,7 @@ def parte1_test_ucd():
           f'entre bases.')
     print()
     return df_u, yu, resultados
-
+ 
 
 # =============================================================================
 # PARTE 2: clasificacion per-sujeto (Apnea-ECG, solo A y C)
