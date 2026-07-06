@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QComboBox, QTabWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableView, QFormLayout,
     QHeaderView, QGroupBox, QGridLayout, QStatusBar, QMessageBox, QTableWidget,
-    QTableWidgetItem, QAbstractItemView,
+    QTableWidgetItem, QAbstractItemView, QDialog,
 )
 import pyqtgraph as pg
 
@@ -246,8 +246,11 @@ class BarraComparacion(QtWidgets.QWidget):
         if (self.media_normal is not None and self.media_apnea is not None
                 and not pd.isna(self.valor) and self.media_apnea != self.media_normal):
             frac = (self.valor - self.media_normal) / (self.media_apnea - self.media_normal)
-            frac = min(max(frac, -0.12), 1.12)
             x = x0 + frac * (x1 - x0)
+            # Acotamos la posicion en PIXELES (no la fraccion): si el valor es
+            # muy extremo, el punto queda pegado al borde del widget en vez
+            # de calcularse fuera de él y quedar recortado (invisible).
+            x = min(max(x, 4), w - 4)
             p.setBrush(QtGui.QColor('#f0f0f0'))
             p.setPen(QtGui.QPen(QtGui.QColor('#15171d'), 1.5))
             p.drawEllipse(QtCore.QPointF(x, barra_y + barra_h / 2), 6, 6)
@@ -545,6 +548,7 @@ class SolapaMedica(QWidget):
         self._feat = None
         self._pred = None
         self._min_sel = None
+        self._dlg_feat = None
         self._build_ui()
 
     def _build_ui(self):
@@ -631,6 +635,9 @@ class SolapaMedica(QWidget):
 
         gb_feat = QGroupBox('¿Por qué apnea? — features vs. referencia')
         vf = QVBoxLayout(gb_feat)
+        hint_feat = QLabel('<small>Click en una fila para ampliar (se muestran todas las features)</small>')
+        hint_feat.setStyleSheet('color:#889;')
+        vf.addWidget(hint_feat)
         self.tbl_feat = QTableWidget(0, 3)
         self.tbl_feat.setHorizontalHeaderLabels(['Feature', 'Valor', 'Normal ⟷ Apnea'])
         self.tbl_feat.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -640,6 +647,9 @@ class SolapaMedica(QWidget):
         self.tbl_feat.verticalHeader().setDefaultSectionSize(36)
         self.tbl_feat.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl_feat.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tbl_feat.setCursor(Qt.PointingHandCursor)
+        self.tbl_feat.setToolTip('Click para ver esta tabla más grande, con todas las features')
+        self.tbl_feat.cellClicked.connect(self._abrir_tabla_grande)
         vf.addWidget(self.tbl_feat)
         rl.addWidget(gb_feat, stretch=1)
 
@@ -792,26 +802,93 @@ class SolapaMedica(QWidget):
                 'font-weight:bold;color:#c02020' if pr == 1 else 'font-weight:bold;color:#207020')
         self._llenar_tabla_features(minuto)
 
-    def _llenar_tabla_features(self, minuto):
-        self.tbl_feat.setRowCount(0)
+    def _filas_features(self, minuto, features):
+        """Devuelve [(nombre, valor, media_normal, media_apnea), ...] para
+        `features` en `minuto`. Compartido entre la tabla chica y la grande."""
         if minuto not in self._feat_idx.index:
-            return
+            return []
         fila = self._feat_idx.loc[minuto]
         ranking = self.datos.ranking
-        orden = self.datos.orden_features[:self.N_FEATURES_PANEL]
-        for feat in orden:
+        filas = []
+        for feat in features:
             if feat not in fila.index:
                 continue
             val = fila[feat]
-            r = self.tbl_feat.rowCount()
-            self.tbl_feat.insertRow(r)
-            self.tbl_feat.setItem(r, 0, QTableWidgetItem(FEATURE_LABELS.get(feat, feat)))
-            self.tbl_feat.setItem(r, 1, QTableWidgetItem('-' if pd.isna(val) else f'{val:.3g}'))
             mn = ma = None
             if ranking is not None and feat in ranking.index:
                 ref = ranking.loc[feat]
                 mn, ma = float(ref['media_N']), float(ref['media_A'])
-            self.tbl_feat.setCellWidget(r, 2, BarraComparacion(val, mn, ma))
+            filas.append((FEATURE_LABELS.get(feat, feat), val, mn, ma))
+        return filas
+
+    @staticmethod
+    def _poblar_tabla(tabla, filas, alto_barra):
+        tabla.setRowCount(0)
+        for nombre, val, mn, ma in filas:
+            r = tabla.rowCount()
+            tabla.insertRow(r)
+            tabla.setItem(r, 0, QTableWidgetItem(nombre))
+            tabla.setItem(r, 1, QTableWidgetItem('-' if pd.isna(val) else f'{val:.3g}'))
+            barra = BarraComparacion(val, mn, ma)
+            barra.setMinimumHeight(alto_barra)
+            tabla.setCellWidget(r, 2, barra)
+
+    def _llenar_tabla_features(self, minuto):
+        orden = self.datos.orden_features[:self.N_FEATURES_PANEL]
+        filas = self._filas_features(minuto, orden)
+        self._poblar_tabla(self.tbl_feat, filas, alto_barra=28)
+        if self._dlg_feat is not None and self._dlg_feat.isVisible():
+            self._refrescar_tabla_grande()
+
+    # --- Ventana ampliada (click en la tabla de features) -------------------
+    def _abrir_tabla_grande(self, *_args):
+        if self._dlg_feat is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle('¿Por qué apnea? — vista ampliada')
+            dlg.resize(1000, 780)
+            lay = QVBoxLayout(dlg)
+
+            self._lbl_dlg_titulo = QLabel('')
+            self._lbl_dlg_titulo.setStyleSheet('font-size:15px; font-weight:bold; padding:4px;')
+            lay.addWidget(self._lbl_dlg_titulo)
+
+            self.tbl_feat_grande = QTableWidget(0, 3)
+            self.tbl_feat_grande.setHorizontalHeaderLabels(['Feature', 'Valor', 'Normal ⟷ Apnea'])
+            self.tbl_feat_grande.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            self.tbl_feat_grande.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            self.tbl_feat_grande.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+            self.tbl_feat_grande.verticalHeader().setVisible(False)
+            self.tbl_feat_grande.verticalHeader().setDefaultSectionSize(52)
+            self.tbl_feat_grande.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.tbl_feat_grande.setSelectionMode(QAbstractItemView.NoSelection)
+            f = self.tbl_feat_grande.font()
+            f.setPointSize(11)
+            self.tbl_feat_grande.setFont(f)
+            self.tbl_feat_grande.horizontalHeader().setFont(f)
+            lay.addWidget(self.tbl_feat_grande)
+
+            botones = QHBoxLayout()
+            botones.addStretch()
+            btn_cerrar = QPushButton('Cerrar')
+            btn_cerrar.clicked.connect(dlg.close)
+            botones.addWidget(btn_cerrar)
+            lay.addLayout(botones)
+
+            self._dlg_feat = dlg
+
+        self._refrescar_tabla_grande()
+        self._dlg_feat.show()
+        self._dlg_feat.raise_()
+        self._dlg_feat.activateWindow()
+
+    def _refrescar_tabla_grande(self):
+        if self._min_sel is None:
+            return
+        filas = self._filas_features(self._min_sel, self.datos.orden_features)
+        self._lbl_dlg_titulo.setText(
+            f'Registro {self._record} — minuto {self._min_sel} '
+            f'— {len(filas)} features vs. referencia normal/apnea')
+        self._poblar_tabla(self.tbl_feat_grande, filas, alto_barra=44)
 
 
 # =============================================================================
