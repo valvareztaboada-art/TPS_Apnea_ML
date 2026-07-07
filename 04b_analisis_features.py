@@ -234,22 +234,29 @@ plt.tight_layout(); plt.show()
 # =============================================================================
 # FIGURA 3: heatmap de correlacion entre features (redundancia)
 # =============================================================================
-corr = df[feature_cols].corr()
+corr = df[feature_cols].dropna().corr()
+etiquetas = list(corr.columns)          # orden real de la matriz
+M = corr.values
+ 
 fig, ax = plt.subplots(figsize=(13, 11))
-if _HAY_SNS:
-    sns.heatmap(corr, annot=False, cmap='RdBu_r', center=0, vmin=-1, vmax=1,
-                square=True, ax=ax, cbar_kws={'shrink': 0.7})
-else:
-    im = ax.imshow(corr, cmap='RdBu_r', vmin=-1, vmax=1)
-    ax.set_xticks(range(len(feature_cols)))
-    ax.set_xticklabels(feature_cols, rotation=90, fontsize=7)
-    ax.set_yticks(range(len(feature_cols)))
-    ax.set_yticklabels(feature_cols, fontsize=7)
-    plt.colorbar(im, ax=ax, shrink=0.7)
-ax.set_title('Correlacion entre features (rojo=alta corr -> redundancia, '
-             'justifica reduccion / PCA)')
+im = ax.imshow(M, cmap='RdBu_r', vmin=-1, vmax=1, aspect='equal')
+ax.set_xticks(range(len(etiquetas)))
+ax.set_xticklabels(etiquetas, rotation=90, fontsize=7)
+ax.set_yticks(range(len(etiquetas)))
+ax.set_yticklabels(etiquetas, fontsize=7)
+# anotar el valor en cada celda (chico) para poder verificar
+for i in range(len(etiquetas)):
+    for j in range(len(etiquetas)):
+        v = M[i, j]
+        if not np.isnan(v):
+            ax.text(j, i, f'{v:.2f}', ha='center', va='center',
+                    fontsize=5,
+                    color='white' if abs(v) > 0.6 else '#333333')
+plt.colorbar(im, ax=ax, shrink=0.7, label='Correlacion (Pearson)')
+ax.set_title('Correlacion entre features '
+             '(|r| alto -> redundancia; cercano a 0 -> independiente)')
 plt.tight_layout(); plt.show()
-
+ 
 # reportar pares muy correlacionados
 print('Pares de features muy correlacionadas (|r| > 0.85):')
 pares = []
