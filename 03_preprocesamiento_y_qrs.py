@@ -60,7 +60,7 @@ MINUTO_VIZ = 30
 # Sujeto de Apnea-ECG con outliers de RR para la validacion manual de ectopicos
 # (la devolucion pedia verificar si los RR descartados eran ectopicos reales,
 # error de deteccion, o apnea que no habia que sacar). 
-REG_OUTLIERS = 'a05'
+REG_OUTLIERS = 'c03'
 # cuantos RR descartados inspeccionar en detalle (los de mayor desviacion)
 N_ECTOPICOS_VIZ = 6
 # ventana de ECG alrededor de cada RR descartado (segundos a cada lado)
